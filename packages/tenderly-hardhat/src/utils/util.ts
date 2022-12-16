@@ -8,7 +8,7 @@ import {
   ResolvedFile,
   SolcConfig
 } from "hardhat/types";
-import { TenderlyContract, TenderlyContractConfig } from "tenderly/types";
+import { ContractCompiler, TenderlyContract, TenderlyContractConfig } from "tenderly/types";
 
 import { PLUGIN_NAME } from "../constants";
 import { CONTRACTS_NOT_DETECTED } from "../tenderly/errors";
@@ -45,6 +45,77 @@ export const getCompilerDataFromContracts = (
   logger.silly("Obtained compiler configuration is:", config);
 
   return config;
+};
+
+export const getContractsSimple = async (
+  hre: HardhatRuntimeEnvironment,
+  flatContracts: ContractByName[],
+  forkId: string | undefined
+): Promise<TenderlyContract[]> => {
+  const contractsToPush: TenderlyContract[] = [];
+  let version: string | undefined;
+
+  for (const contract of flatContracts) {
+    const { sourceName, contractName } = await hre.artifacts.readArtifact(contract.name);
+
+    const depArgs = { sourceNames: [sourceName] };
+    const dependencyGraph: DependencyGraph = await hre.run("compile:solidity:get-dependency-graph", depArgs);
+
+    const resolvedFiles = dependencyGraph.getResolvedFiles();
+    const file = resolvedFiles.find((f) => f.sourceName === sourceName);
+
+    if (file === undefined) {
+      throw new HardhatPluginError(PLUGIN_NAME, CONTRACTS_NOT_DETECTED);
+    }
+
+    const jobArgs = { dependencyGraph, file };
+    const job: CompilationJob = await hre.run("compile:solidity:get-compilation-job-for-file", jobArgs);
+
+    const hhConfig: SolcConfig = job.getSolcConfig();
+
+    if (version === undefined) {
+      version = hhConfig?.version;
+    } else if (hhConfig?.version !== version) {
+      logger.error(`Error in ${PLUGIN_NAME}: Different compiler versions provided in same request`);
+      throw new Error("Different compiler versions provided in same request");
+    }
+
+    const compiler: ContractCompiler = {
+      name: "solc",
+      version: extractCompilerVersion(hre.config, sourceName, file.content.versionPragmas[0]),
+    };
+
+    const requestedContract: TenderlyContract = {
+      contractName,
+      source: file.content.rawContent,
+      sourcePath: sourceName,
+      compiler,
+      networks: {
+        [forkId!]: {
+          address: contract.address,
+          links: contract.libraries,
+        },
+      },
+    };
+
+    contractsToPush.push(requestedContract);
+
+    for (const resolvedFile of dependencyGraph.getResolvedFiles()) {
+      if (resolvedFile.sourceName === sourceName) {
+        continue;
+      }
+      contractsToPush.push({
+        // using file name as contract name but it seems like it doesn't really matter
+        contractName: resolvedFile.sourceName.split("/").pop()!.split(".")[0],
+        source: resolvedFile.content.rawContent,
+        sourcePath: resolvedFile.sourceName,
+        networks: {},
+        compiler,
+      });
+    }
+  }
+
+  return contractsToPush;
 };
 
 export const getContracts = async (

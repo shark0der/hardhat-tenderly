@@ -9,7 +9,7 @@ import { TENDERLY_JSON_RPC_BASE_URL } from "tenderly/common/constants";
 import { PLUGIN_NAME } from "./constants";
 import { ContractByName } from "./tenderly/types";
 import { NO_COMPILER_FOUND_FOR_CONTRACT_ERR_MSG } from "./tenderly/errors";
-import {getCompilerDataFromContracts, getCompilerDataFromHardhat, getContracts} from "./utils/util";
+import { getCompilerDataFromHardhat, getContracts, getContractsSimple } from "./utils/util";
 import { logger } from "./utils/logger";
 import { convertToLogCompliantForkInitializeResponse } from "tenderly/utils/log-compliance";
 
@@ -102,7 +102,7 @@ export class TenderlyNetwork {
     }
 
     const flatContracts: ContractByName[] = contracts.reduce((accumulator, value) => accumulator.concat(value), []);
-    const requestData = await this._filterContracts(flatContracts);
+    const requestData = await this._getForkContractData(flatContracts);
     if (requestData === null) {
       logger.error("Fork verification failed due to bad processing of data in /artifacts directory.");
       return;
@@ -200,55 +200,17 @@ export class TenderlyNetwork {
     writeConfig(tdlyGlobalConfig);
   }
 
-  private async _filterContracts(flatContracts: ContractByName[]): Promise<TenderlyForkContractUploadRequest | null> {
-    logger.info("Processing data needed for fork verification.");
-
-    let contract: ContractByName;
-    let requestData: TenderlyForkContractUploadRequest;
-    try {
-      requestData = await this._getForkContractData(flatContracts);
-      logger.silly("Obtained request data needed for fork verification:", requestData);
-    } catch (e) {
-      logger.error("Caught and error while trying to obtain data needed for fork verification", e);
-      return null;
-    }
-
-    for (contract of flatContracts) {
-      const index = requestData.contracts.findIndex(
-        (requestContract) => {
-          const partialName = requestContract.contractName;
-          const fullName = requestContract.sourcePath + ":" + requestContract.contractName;
-          return partialName === contract.name || fullName === contract.name; 
-        }
-      );
-      if (index === -1) {
-        logger.error(`Couldn't find a contract '${contract.name}' among the obtained request data.`);
-        continue;
-      }
-
-      logger.trace("Currently processing contract:", contract.name);
-      requestData.contracts[index].networks = {
-        [this.forkID!]: {
-          address: contract.address,
-          links: contract.libraries,
-        },
-      };
-      logger.trace(`Contract ${contract.name} has been processed,`);
-    }
-
-    return requestData;
-  }
-
   private async _getForkContractData(flatContracts: ContractByName[]): Promise<TenderlyForkContractUploadRequest> {
     logger.trace("Getting contract data needed for fork verification.");
 
-    const contracts = await getContracts(this.env, flatContracts);
+    const contracts = await getContractsSimple(this.env, flatContracts, this.forkID!);
+
     if (contracts.length === 0) {
       throw new Error("Fork verification failed due to bad processing of data in /artifacts folder.");
     }
 
     const solcConfig = await getCompilerDataFromHardhat(this.env, contracts[0].sourcePath);
-    
+
     if (solcConfig === undefined) {
       logger.error(NO_COMPILER_FOUND_FOR_CONTRACT_ERR_MSG);
     }
